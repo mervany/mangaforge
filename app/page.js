@@ -8,7 +8,6 @@ export default function Home() {
   const [progressLabel, setProgressLabel] = useState('')
   const [videoUrl, setVideoUrl] = useState(null)
   const [error, setError] = useState(null)
-  const [apiKey, setApiKey] = useState('')
   const canvasRef = useRef(null)
 
   const onDrop = useCallback((e) => {
@@ -29,44 +28,38 @@ export default function Home() {
   })
 
   const generate = async () => {
-    if (!image || !apiKey) return
+    if (!image) return
     setStage('processing'); setError(null); setVideoUrl(null)
 
     try {
-      // Step 1: Get depth map from Replicate
-      setProgressLabel('🤖 Derinlik haritası oluşturuluyor...')
+      setProgressLabel('🤖 Görsel yükleniyor...')
       const b64 = await toBase64(image)
 
-      const predRes = await fetch('https://api.replicate.com/v1/predictions', {
+      setProgressLabel('🔍 Derinlik haritası oluşturuluyor...')
+      const predRes = await fetch('/api/depth', {
         method: 'POST',
-        headers: { 'Authorization': `Token ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: "a4ba86e6a4ace1e4cb6b9a56fe85d1ded7c64b00c8e9be3ab5fb8eb68cef5e01",
-          input: { image: b64 }
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageUrl: b64 })
       })
       const pred = await predRes.json()
       if (pred.error) throw new Error(pred.error)
 
-      // Step 2: Poll for result
-      setProgressLabel('⏳ Sonuç bekleniyor...')
       let depthUrl = null
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 2000))
-        const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${pred.id}`, {
-          headers: { 'Authorization': `Token ${apiKey}` }
-        })
+        const pollRes = await fetch(`/api/depth?id=${pred.id}`)
         const pollData = await pollRes.json()
         if (pollData.status === 'succeeded') { depthUrl = pollData.output; break }
-        if (pollData.status === 'failed') throw new Error('Depth map oluşturulamadı')
-        setProgressLabel(`⏳ İşleniyor... (${i + 1}/30)`)
+        if (pollData.status === 'failed') throw new Error('Depth map başarısız')
+        setProgressLabel(`⏳ İşleniyor... ${i + 1}/30`)
       }
       if (!depthUrl) throw new Error('Zaman aşımı')
 
-      // Step 3: Create parallax video on canvas
       setProgressLabel('🎬 Parallax video oluşturuluyor...')
       const canvas = canvasRef.current
       const ctx = canvas.getContext('2d')
+      const W = 854, H = 480
+      canvas.width = W; canvas.height = H
 
       const loadImg = url => new Promise((res, rej) => {
         const img = new Image(); img.crossOrigin = 'anonymous'
@@ -78,10 +71,6 @@ export default function Home() {
         loadImg(Array.isArray(depthUrl) ? depthUrl[0] : depthUrl)
       ])
 
-      const W = 854, H = 480
-      canvas.width = W; canvas.height = H
-
-      // Extract depth data
       const depthCanvas = document.createElement('canvas')
       depthCanvas.width = origImg.width; depthCanvas.height = origImg.height
       const dc = depthCanvas.getContext('2d')
@@ -95,13 +84,11 @@ export default function Home() {
       for (let f = 0; f < totalFrames; f++) {
         const t = f / totalFrames
         const angle = t * Math.PI * 2
-        const shiftX = Math.sin(angle) * 20
-        const shiftY = Math.cos(angle) * 10
+        const shiftX = Math.sin(angle) * 25
+        const shiftY = Math.cos(angle) * 12
 
         ctx.clearRect(0, 0, W, H)
         ctx.drawImage(origImg, 0, 0, W, H)
-
-        // Apply parallax displacement per depth layer
         const imgData = ctx.getImageData(0, 0, W, H)
         const output = ctx.createImageData(W, H)
 
@@ -111,10 +98,8 @@ export default function Home() {
             const srcY = Math.round(y / H * origImg.height)
             const di = (srcY * origImg.width + srcX) * 4
             const depth = depthData[di] / 255
-
             const dx = Math.round(x - shiftX * depth)
             const dy = Math.round(y - shiftY * depth)
-
             if (dx >= 0 && dx < W && dy >= 0 && dy < H) {
               const si = (dy * W + dx) * 4
               const oi = (y * W + x) * 4
@@ -127,11 +112,10 @@ export default function Home() {
         }
         ctx.putImageData(output, 0, 0)
         frames.push(canvas.toDataURL('image/jpeg', 0.8))
-        if (f % 10 === 0) setProgressLabel(`🎬 Frame ${f}/${totalFrames}...`)
+        if (f % 12 === 0) setProgressLabel(`🎬 Frame ${f}/${totalFrames}`)
         await new Promise(r => setTimeout(r, 0))
       }
 
-      // Encode video
       setProgressLabel('📼 Video encode ediliyor...')
       const stream = canvas.captureStream(FPS)
       const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm'
@@ -154,7 +138,6 @@ export default function Home() {
       setVideoUrl(URL.createObjectURL(blob))
       setProgressLabel('Tamamlandı!')
       setStage('done')
-
     } catch (err) {
       setError(err.message)
       setStage('idle')
@@ -173,18 +156,6 @@ export default function Home() {
       </div>
 
       <div style={{ maxWidth: 700, margin: '0 auto', padding: '24px 16px' }}>
-
-        <div style={{ background: '#0f0f1e', border: '1px solid #2a1a4a', borderRadius: 14, padding: 16, marginBottom: 16 }}>
-          <div style={{ fontSize: 12, color: '#7a6a9a', marginBottom: 8, fontWeight: 700 }}>REPLICATE API KEY</div>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={e => setApiKey(e.target.value)}
-            placeholder="r8_..."
-            style={{ width: '100%', background: '#1a1a2e', border: '1px solid #3a2a5a', borderRadius: 8, padding: '10px 12px', color: '#fff', fontSize: 13, boxSizing: 'border-box' }}
-          />
-        </div>
-
         <div onDrop={onDrop} onDragOver={e => e.preventDefault()}
           style={{ border: '2px dashed #3a2a5a', borderRadius: 14, padding: '32px 16px', textAlign: 'center', background: '#0f0f1e', marginBottom: 16, position: 'relative' }}>
           <input type="file" accept="image/*" onChange={onDrop} style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer' }} />
@@ -192,7 +163,7 @@ export default function Home() {
             <img src={imageUrl} alt="" style={{ maxHeight: 300, maxWidth: '100%', borderRadius: 10, display: 'block', margin: '0 auto' }} />
           ) : (
             <>
-              <div style={{ fontSize: 36, marginBottom: 10 }}>🗡</div>
+              <div style={{ fontSize: 36, marginBottom: 10 }}>🗡️</div>
               <div style={{ fontSize: 15, fontWeight: 700, color: '#bf7fff' }}>Manga panelini buraya sürükle</div>
               <div style={{ fontSize: 12, color: '#5a4a7a', marginTop: 5 }}>JPG · PNG · WEBP</div>
             </>
@@ -201,7 +172,7 @@ export default function Home() {
 
         {error && <div style={{ background: '#2a0a1a', border: '1px solid #5a1a3a', borderRadius: 12, padding: 14, marginBottom: 16, color: '#ff6688', fontSize: 13 }}>❌ {error}</div>}
 
-        {image && apiKey && stage === 'idle' && (
+        {image && stage === 'idle' && (
           <button onClick={generate} style={{ width: '100%', padding: 14, borderRadius: 12, background: 'linear-gradient(135deg,#7b2fff,#ff2f7b)', border: 'none', color: '#fff', fontSize: 15, fontWeight: 800, cursor: 'pointer', marginBottom: 16 }}>
             ⚡ 3D PARALLAX OLUŞTUR
           </button>
@@ -216,10 +187,4 @@ export default function Home() {
 
         {stage === 'done' && videoUrl && (
           <div style={{ background: '#0f0f1e', border: '1px solid #2a1a4a', borderRadius: 14, padding: 18 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-              <span>✅</span><span style={{ fontWeight: 700, color: '#44ff88' }}>3D Video hazır!</span>
-            </div>
-            <video src={videoUrl} controls playsInline loop style={{ width: '100%', borderRadius: 10, marginBottom: 14, background: '#000' }} />
-            <div style={{ display: 'flex', gap: 10 }}>
-              <button onClick={() => { const a = document.createElement('a'); a.href = videoUrl; a.download = `manga-3d-${Date.now()}.webm`; a.click() }}
-                style={{ flex: 1, padding: 12, borderRadius: 10, background: 'linear-gradient(135deg,
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8
