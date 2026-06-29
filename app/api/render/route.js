@@ -35,7 +35,9 @@ async function renderFrame(imgBuffer, analysis, frameIndex, totalFrames, W, H) {
     const g = parseInt(hex.slice(2, 4), 16)
     const b = parseInt(hex.slice(4, 6), 16)
     const flashOverlay = await sharp({ create: { width: W, height: H, channels: 4, background: { r, g, b, alpha } } }).png().toBuffer()
-    base = await sharp(base).composite([{ input: flashOverlay, blend: 'over' }]).jpeg({ quality: 85 }).toBuffer()
+  const safeLeft = Math.max(0, Math.min(offsetX, W - 1))
+const safeTop = Math.max(0, Math.min(offsetY, H - 1))
+base = await sharp(base).composite([{ input: resized, left: safeLeft, top: safeTop }]).jpeg({ quality: 85 }).toBuffer()
   }
 
   if (analysis.intensity >= 5 && t < 0.5) {
