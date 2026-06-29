@@ -1,122 +1,139 @@
 'use client'
 import { useState, useCallback, useRef } from 'react'
 
-async function analyzePanel(base64, mediaType) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 500,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-          { type: "text", text: `Analyze this manga fight panel. Return ONLY valid JSON:
-{"intensity":7,"motionType":"slash","direction":"right","effectColor":"#ff4444","duration":2.0,"description":"Dövüş sahnesi","flashColor":"#ffffff"}` }
-        ]
-      }]
-    })
-  })
-  const data = await response.json()
-  const text = data.content?.map(b => b.text || '').join('') || ''
-  try { return JSON.parse(text.replace(/```json|```/g, '').trim()) }
-  catch { return { intensity: 6, motionType: 'slash', direction: 'right', effectColor: '#ff4444', duration: 2.0, description: 'Dövüş', flashColor: '#ffffff' } }
-}
-
-function renderPanelFrames(img, analysis, canvas, ctx, fps) {
-  const W = canvas.width, H = canvas.height
-  const total = Math.round(analysis.duration * fps)
-  const frames = []
-  for (let f = 0; f < total; f++) {
-    const t = f / total
-    ctx.clearRect(0, 0, W, H)
-    const ir = img.width / img.height, cr = W / H
-    let dw, dh, dx, dy
-    if (ir > cr) { dh = H; dw = H * ir; dx = (W - dw) / 2; dy = 0 }
-    else { dw = W; dh = W / ir; dx = 0; dy = (H - dh) / 2 }
-    let sx = 0, sy = 0
-    if (analysis.intensity >= 6 && t < 0.5) { const s = (0.5 - t) * analysis.intensity * 2; sx = (Math.random() - 0.5) * s; sy = (Math.random() - 0.5) * s }
-    ctx.save(); ctx.translate(sx, sy)
-    let scale = 1
-    if (t < 0.2) scale = 1 + t * 0.1
-    else if (t < 0.4) scale = 1.02 - (t - 0.2) * 0.05
-    ctx.save(); ctx.translate(W / 2, H / 2); ctx.scale(scale, scale); ctx.translate(-W / 2, -H / 2)
-    ctx.drawImage(img, dx, dy, dw, dh); ctx.restore()
-    if (analysis.intensity >= 5 && t < 0.5) {
-      const a = (0.5 - t) * (analysis.intensity / 10) * 0.7
-      const angle = analysis.direction === 'right' ? 0 : analysis.direction === 'left' ? Math.PI : analysis.direction === 'up' ? -Math.PI / 2 : Math.PI / 2
-      ctx.save(); ctx.globalAlpha = a
-      for (let i = 0; i < analysis.intensity * 3; i++) {
-        const sp = (Math.random() - 0.5) * H * 1.4, len = 60 + Math.random() * 180
-        const x1 = W / 2 - Math.cos(angle) * len * 0.5, y1 = H / 2 + sp - Math.sin(angle) * len * 0.5
-        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x1 + Math.cos(angle) * len, y1 + Math.sin(angle) * len)
-        ctx.strokeStyle = analysis.effectColor; ctx.lineWidth = 0.5 + Math.random() * 1.5; ctx.stroke()
-      }
-      ctx.restore()
-    }
-    if (analysis.flashColor && t < 0.08) { ctx.save(); ctx.globalAlpha = (0.08 - t) / 0.08 * 0.8; ctx.fillStyle = analysis.flashColor; ctx.fillRect(0, 0, W, H); ctx.restore() }
-    ctx.restore()
-    frames.push(canvas.toDataURL('image/jpeg', 0.8))
-  }
-  return frames
-}
-
 export default function Home() {
-  const [panels, setPanels] = useState([])
+  const [image, setImage] = useState(null)
+  const [imageUrl, setImageUrl] = useState(null)
   const [stage, setStage] = useState('idle')
-  const [progress, setProgress] = useState(0)
   const [progressLabel, setProgressLabel] = useState('')
   const [videoUrl, setVideoUrl] = useState(null)
   const [error, setError] = useState(null)
+  const [apiKey, setApiKey] = useState('')
   const canvasRef = useRef(null)
-
-  const toBase64 = f => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(f) })
-  const getMediaType = f => f.type || (f.name.endsWith('.png') ? 'image/png' : 'image/jpeg')
-  const loadImg = url => new Promise(res => { const i = new Image(); i.onload = () => res(i); i.src = url })
 
   const onDrop = useCallback((e) => {
     e.preventDefault()
-    const files = Array.from(e.dataTransfer?.files || e.target.files || []).filter(f => f.type.startsWith('image/'))
-    if (!files.length) return
-    setPanels(prev => [...prev, ...files.map(f => ({ file: f, url: URL.createObjectURL(f), name: f.name, analysis: null }))])
+    const file = (e.dataTransfer?.files || e.target.files)?.[0]
+    if (!file || !file.type.startsWith('image/')) return
+    setImage(file)
+    setImageUrl(URL.createObjectURL(file))
+    setVideoUrl(null)
+    setError(null)
   }, [])
 
+  const toBase64 = f => new Promise((res, rej) => {
+    const r = new FileReader()
+    r.onload = () => res(r.result)
+    r.onerror = rej
+    r.readAsDataURL(f)
+  })
+
   const generate = async () => {
-    if (!panels.length) return
-    setStage('analyzing'); setProgress(0); setError(null); setVideoUrl(null)
-    const analyzed = [...panels]
-    for (let i = 0; i < analyzed.length; i++) {
-      setProgressLabel(`🤖 Panel ${i + 1}/${analyzed.length} analiz ediliyor...`)
-      try {
-        const b64 = await toBase64(analyzed[i].file)
-        analyzed[i].analysis = await analyzePanel(b64, getMediaType(analyzed[i].file))
-      } catch {
-        analyzed[i].analysis = { intensity: 6, motionType: 'slash', direction: 'right', effectColor: '#ff4444', duration: 2.0, description: 'Dövüş', flashColor: '#ffffff' }
-      }
-      setProgress(Math.round((i + 1) / analyzed.length * 35))
-    }
-    setPanels([...analyzed])
-    setStage('rendering')
-    const canvas = canvasRef.current
-    canvas.width = 854; canvas.height = 480
-    const ctx = canvas.getContext('2d')
-    const fps = 24
-    const allFrames = []
-    for (let i = 0; i < analyzed.length; i++) {
-      setProgressLabel(`🎬 Panel ${i + 1}/${analyzed.length} render ediliyor...`)
-      const img = await loadImg(analyzed[i].url)
-      allFrames.push(...renderPanelFrames(img, analyzed[i].analysis, canvas, ctx, fps))
-      if (i < analyzed.length - 1) {
-        ctx.fillStyle = '#000'; ctx.fillRect(0, 0, 854, 480)
-        for (let t = 0; t < 6; t++) allFrames.push(canvas.toDataURL('image/jpeg', 0.8))
-      }
-      setProgress(35 + Math.round((i + 1) / analyzed.length * 50))
-    }
-    setProgressLabel('🎞️ Video encode ediliyor...')
-    setProgress(88)
+    if (!image || !apiKey) return
+    setStage('processing'); setError(null); setVideoUrl(null)
+
     try {
-      const stream = canvas.captureStream(fps)
+      // Step 1: Get depth map from Replicate
+      setProgressLabel('🤖 Derinlik haritası oluşturuluyor...')
+      const b64 = await toBase64(image)
+
+      const predRes = await fetch('https://api.replicate.com/v1/predictions', {
+        method: 'POST',
+        headers: { 'Authorization': `Token ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          version: "a4ba86e6a4ace1e4cb6b9a56fe85d1ded7c64b00c8e9be3ab5fb8eb68cef5e01",
+          input: { image: b64 }
+        })
+      })
+      const pred = await predRes.json()
+      if (pred.error) throw new Error(pred.error)
+
+      // Step 2: Poll for result
+      setProgressLabel('⏳ Sonuç bekleniyor...')
+      let depthUrl = null
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 2000))
+        const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${pred.id}`, {
+          headers: { 'Authorization': `Token ${apiKey}` }
+        })
+        const pollData = await pollRes.json()
+        if (pollData.status === 'succeeded') { depthUrl = pollData.output; break }
+        if (pollData.status === 'failed') throw new Error('Depth map oluşturulamadı')
+        setProgressLabel(`⏳ İşleniyor... (${i + 1}/30)`)
+      }
+      if (!depthUrl) throw new Error('Zaman aşımı')
+
+      // Step 3: Create parallax video on canvas
+      setProgressLabel('🎬 Parallax video oluşturuluyor...')
+      const canvas = canvasRef.current
+      const ctx = canvas.getContext('2d')
+
+      const loadImg = url => new Promise((res, rej) => {
+        const img = new Image(); img.crossOrigin = 'anonymous'
+        img.onload = () => res(img); img.onerror = rej; img.src = url
+      })
+
+      const [origImg, depthImg] = await Promise.all([
+        loadImg(imageUrl),
+        loadImg(Array.isArray(depthUrl) ? depthUrl[0] : depthUrl)
+      ])
+
+      const W = 854, H = 480
+      canvas.width = W; canvas.height = H
+
+      // Extract depth data
+      const depthCanvas = document.createElement('canvas')
+      depthCanvas.width = origImg.width; depthCanvas.height = origImg.height
+      const dc = depthCanvas.getContext('2d')
+      dc.drawImage(depthImg, 0, 0, origImg.width, origImg.height)
+      const depthData = dc.getImageData(0, 0, origImg.width, origImg.height).data
+
+      const FPS = 24, DURATION = 4
+      const totalFrames = FPS * DURATION
+      const frames = []
+
+      for (let f = 0; f < totalFrames; f++) {
+        const t = f / totalFrames
+        const angle = t * Math.PI * 2
+        const shiftX = Math.sin(angle) * 20
+        const shiftY = Math.cos(angle) * 10
+
+        ctx.clearRect(0, 0, W, H)
+        ctx.drawImage(origImg, 0, 0, W, H)
+
+        // Apply parallax displacement per depth layer
+        const imgData = ctx.getImageData(0, 0, W, H)
+        const output = ctx.createImageData(W, H)
+
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const srcX = Math.round(x / W * origImg.width)
+            const srcY = Math.round(y / H * origImg.height)
+            const di = (srcY * origImg.width + srcX) * 4
+            const depth = depthData[di] / 255
+
+            const dx = Math.round(x - shiftX * depth)
+            const dy = Math.round(y - shiftY * depth)
+
+            if (dx >= 0 && dx < W && dy >= 0 && dy < H) {
+              const si = (dy * W + dx) * 4
+              const oi = (y * W + x) * 4
+              output.data[oi] = imgData.data[si]
+              output.data[oi+1] = imgData.data[si+1]
+              output.data[oi+2] = imgData.data[si+2]
+              output.data[oi+3] = 255
+            }
+          }
+        }
+        ctx.putImageData(output, 0, 0)
+        frames.push(canvas.toDataURL('image/jpeg', 0.8))
+        if (f % 10 === 0) setProgressLabel(`🎬 Frame ${f}/${totalFrames}...`)
+        await new Promise(r => setTimeout(r, 0))
+      }
+
+      // Encode video
+      setProgressLabel('📼 Video encode ediliyor...')
+      const stream = canvas.captureStream(FPS)
       const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm'
       const rec = new MediaRecorder(stream, { mimeType: mime })
       const chunks = []
@@ -125,93 +142,84 @@ export default function Home() {
         rec.onstop = resolve; rec.start()
         let fi = 0
         const next = () => {
-          if (fi >= allFrames.length) { rec.stop(); return }
+          if (fi >= frames.length) { rec.stop(); return }
           const img = new Image()
-          img.onload = () => { ctx.drawImage(img, 0, 0); fi++; setTimeout(next, 1000 / fps) }
-          img.src = allFrames[fi]
+          img.onload = () => { ctx.drawImage(img, 0, 0); fi++; setTimeout(next, 1000 / FPS) }
+          img.src = frames[fi]
         }
         next()
       })
+
       const blob = new Blob(chunks, { type: 'video/webm' })
       setVideoUrl(URL.createObjectURL(blob))
-      setProgress(100); setProgressLabel('Tamamlandı!'); setStage('done')
+      setProgressLabel('Tamamlandı!')
+      setStage('done')
+
     } catch (err) {
-      setError('Video encode hatası: ' + err.message); setStage('idle')
+      setError(err.message)
+      setStage('idle')
     }
   }
-
-  const intLabel = n => n >= 9 ? { t: 'GODLIKE', c: '#ff0055' } : n >= 7 ? { t: 'YOĞUN', c: '#ff6600' } : n >= 5 ? { t: 'ORTA', c: '#ffcc00' } : { t: 'HAFİF', c: '#44ff88' }
 
   return (
     <div style={{ minHeight: '100vh', background: '#080810', color: '#e8e8f0', fontFamily: 'system-ui' }}>
       <canvas ref={canvasRef} style={{ display: 'none' }} />
       <div style={{ background: 'linear-gradient(135deg,#0d0d1a,#1a0a2e)', borderBottom: '1px solid #2a1a4a', padding: '20px 24px', display: 'flex', alignItems: 'center', gap: 14 }}>
-        <div style={{ width: 44, height: 44, background: 'linear-gradient(135deg,#7b2fff,#ff2f7b)', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}>⚡</div>
+        <div style={{ width: 44, height: 44, background: 'linear-gradient(135deg,#7b2fff,#ff2f7b)', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}>🎬</div>
         <div>
-          <div style={{ fontSize: 20, fontWeight: 800 }}><span style={{ color: '#bf7fff' }}>MANGA</span><span style={{ color: '#fff' }}>FORGE</span><span style={{ color: '#ff5599', marginLeft: 8, fontSize: 11, letterSpacing: 2 }}>AI VIDEO</span></div>
-          <div style={{ fontSize: 11, color: '#7a6a9a' }}>Dövüş panellerini AI ile videoya dönüştür</div>
+          <div style={{ fontSize: 20, fontWeight: 800 }}><span style={{ color: '#bf7fff' }}>MANGA</span><span style={{ color: '#fff' }}>FORGE</span><span style={{ color: '#ff5599', marginLeft: 8, fontSize: 11, letterSpacing: 2 }}>3D PARALLAX</span></div>
+          <div style={{ fontSize: 11, color: '#7a6a9a' }}>Manga panelini 3D parallax videoya dönüştür</div>
         </div>
       </div>
-      <div style={{ maxWidth: 860, margin: '0 auto', padding: '24px 16px' }}>
-        <div onDrop={onDrop} onDragOver={e => e.preventDefault()} style={{ border: '2px dashed #3a2a5a', borderRadius: 14, padding: '32px 16px', textAlign: 'center', background: '#0f0f1e', marginBottom: 20, position: 'relative' }}>
-          <input type="file" multiple accept="image/*" onChange={onDrop} style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer' }} />
-          <div style={{ fontSize: 36, marginBottom: 10 }}>🗡️</div>
-          <div style={{ fontSize: 15, fontWeight: 700, color: '#bf7fff' }}>Manga panellerini buraya sürükle</div>
-          <div style={{ fontSize: 12, color: '#5a4a7a', marginTop: 5 }}>JPG · PNG · WEBP</div>
+
+      <div style={{ maxWidth: 700, margin: '0 auto', padding: '24px 16px' }}>
+
+        <div style={{ background: '#0f0f1e', border: '1px solid #2a1a4a', borderRadius: 14, padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: '#7a6a9a', marginBottom: 8, fontWeight: 700 }}>REPLICATE API KEY</div>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={e => setApiKey(e.target.value)}
+            placeholder="r8_..."
+            style={{ width: '100%', background: '#1a1a2e', border: '1px solid #3a2a5a', borderRadius: 8, padding: '10px 12px', color: '#fff', fontSize: 13, boxSizing: 'border-box' }}
+          />
         </div>
+
+        <div onDrop={onDrop} onDragOver={e => e.preventDefault()}
+          style={{ border: '2px dashed #3a2a5a', borderRadius: 14, padding: '32px 16px', textAlign: 'center', background: '#0f0f1e', marginBottom: 16, position: 'relative' }}>
+          <input type="file" accept="image/*" onChange={onDrop} style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer' }} />
+          {imageUrl ? (
+            <img src={imageUrl} alt="" style={{ maxHeight: 300, maxWidth: '100%', borderRadius: 10, display: 'block', margin: '0 auto' }} />
+          ) : (
+            <>
+              <div style={{ fontSize: 36, marginBottom: 10 }}>🗡</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: '#bf7fff' }}>Manga panelini buraya sürükle</div>
+              <div style={{ fontSize: 12, color: '#5a4a7a', marginTop: 5 }}>JPG · PNG · WEBP</div>
+            </>
+          )}
+        </div>
+
         {error && <div style={{ background: '#2a0a1a', border: '1px solid #5a1a3a', borderRadius: 12, padding: 14, marginBottom: 16, color: '#ff6688', fontSize: 13 }}>❌ {error}</div>}
-        {panels.length > 0 && (
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-              <div style={{ fontSize: 12, color: '#7a6a9a', fontWeight: 700 }}>PANELLER ({panels.length})</div>
-              <button onClick={() => { setPanels([]); setVideoUrl(null); setStage('idle') }} style={{ background: 'none', border: '1px solid #3a2a5a', borderRadius: 6, color: '#7a6a9a', padding: '3px 10px', cursor: 'pointer', fontSize: 11 }}>Temizle</button>
-            </div>
-            {panels.map((p, i) => {
-              const il = p.analysis ? intLabel(p.analysis.intensity) : null
-              return (
-                <div key={i} style={{ background: '#0f0f1e', border: '1px solid #2a1a4a', borderRadius: 12, padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                  <img src={p.url} alt="" style={{ width: 56, height: 42, borderRadius: 7, objectFit: 'cover', flexShrink: 0 }} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: '#ccc', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</div>
-                    {p.analysis && <div style={{ fontSize: 11, color: '#5a4a7a', marginTop: 2 }}><span style={{ color: il.c, fontWeight: 700 }}>{il.t}</span> · {p.analysis.motionType} · {p.analysis.description}</div>}
-                  </div>
-                  <button onClick={() => setPanels(prev => prev.filter((_, idx) => idx !== i))} style={{ background: '#2a0a1a', border: '1px solid #5a1a3a', borderRadius: 6, color: '#ff4488', width: 26, height: 26, cursor: 'pointer', fontSize: 14 }}>×</button>
-                </div>
-              )
-            })}
-          </div>
-        )}
-        {panels.length > 0 && stage === 'idle' && (
-          <button onClick={generate} style={{ width: '100%', padding: 14, borderRadius: 12, background: 'linear-gradient(135deg,#7b2fff,#ff2f7b)', border: 'none', color: '#fff', fontSize: 15, fontWeight: 800, cursor: 'pointer', marginBottom: 20 }}>
-            ⚡ VİDEO OLUŞTUR — {panels.length} Panel
+
+        {image && apiKey && stage === 'idle' && (
+          <button onClick={generate} style={{ width: '100%', padding: 14, borderRadius: 12, background: 'linear-gradient(135deg,#7b2fff,#ff2f7b)', border: 'none', color: '#fff', fontSize: 15, fontWeight: 800, cursor: 'pointer', marginBottom: 16 }}>
+            ⚡ 3D PARALLAX OLUŞTUR
           </button>
         )}
-        {(stage === 'analyzing' || stage === 'rendering') && (
-          <div style={{ background: '#0f0f1e', border: '1px solid #2a1a4a', borderRadius: 14, padding: 20, marginBottom: 20 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-              <div style={{ fontSize: 13, color: '#bf7fff', fontWeight: 700 }}>{stage === 'analyzing' ? '🤖 AI Analiz' : '🎬 Render'}</div>
-              <div style={{ fontSize: 13, color: '#7a6a9a' }}>{progress}%</div>
-            </div>
-            <div style={{ background: '#1a1a2e', borderRadius: 100, height: 6, marginBottom: 8, overflow: 'hidden' }}>
-              <div style={{ height: '100%', borderRadius: 100, background: 'linear-gradient(90deg,#7b2fff,#ff2f7b)', width: `${progress}%`, transition: 'width 0.3s' }} />
-            </div>
+
+        {stage === 'processing' && (
+          <div style={{ background: '#0f0f1e', border: '1px solid #2a1a4a', borderRadius: 14, padding: 20, marginBottom: 16 }}>
+            <div style={{ fontSize: 13, color: '#bf7fff', fontWeight: 700, marginBottom: 8 }}>🔄 İşleniyor</div>
             <div style={{ fontSize: 12, color: '#5a4a7a' }}>{progressLabel}</div>
           </div>
         )}
+
         {stage === 'done' && videoUrl && (
-          <div style={{ background: '#0f0f1e', border: '1px solid #2a1a4a', borderRadius: 14, padding: 18, marginBottom: 20 }}>
+          <div style={{ background: '#0f0f1e', border: '1px solid #2a1a4a', borderRadius: 14, padding: 18 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-              <span>✅</span><span style={{ fontWeight: 700, color: '#44ff88' }}>Video hazır!</span>
+              <span>✅</span><span style={{ fontWeight: 700, color: '#44ff88' }}>3D Video hazır!</span>
             </div>
-            <video src={videoUrl} controls playsInline style={{ width: '100%', borderRadius: 10, marginBottom: 14, background: '#000' }} />
+            <video src={videoUrl} controls playsInline loop style={{ width: '100%', borderRadius: 10, marginBottom: 14, background: '#000' }} />
             <div style={{ display: 'flex', gap: 10 }}>
-              <button onClick={() => { const a = document.createElement('a'); a.href = videoUrl; a.download = `manga-${Date.now()}.webm`; a.click() }}
-                style={{ flex: 1, padding: 12, borderRadius: 10, background: 'linear-gradient(135deg,#7b2fff,#ff2f7b)', border: 'none', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>⬇️ İndir</button>
-              <button onClick={() => { setStage('idle'); setVideoUrl(null) }} style={{ padding: '12px 18px', borderRadius: 10, background: '#1a1a2e', border: '1px solid #3a2a5a', color: '#9a8aaa', fontSize: 14, cursor: 'pointer' }}>Yeni</button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
+              <button onClick={() => { const a = document.createElement('a'); a.href = videoUrl; a.download = `manga-3d-${Date.now()}.webm`; a.click() }}
+                style={{ flex: 1, padding: 12, borderRadius: 10, background: 'linear-gradient(135deg,
